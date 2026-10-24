@@ -50,6 +50,9 @@ public object ChunkedBodyValidator {
                     throw HttpParseException("Chunk size overflow.")
 
                 chunkSize = (chunkSize shl 4) or hexVal(data.at(pos)).toLong()
+                // 16 digits reach 2^64 - 1, a negative Long: such a size is refused, not cut to its low bits
+                if (chunkSize < 0)
+                    throw HttpParseException("Chunk size overflow.")
                 digitCount++
                 pos++
             }
@@ -145,7 +148,7 @@ public object ChunkedBodyValidator {
             }
 
             // --- Read chunk data (exactly chunkSize bytes) ---
-            if (pos + chunkSize > length)
+            if (chunkSize > length - pos)
                 return -1 // incomplete
 
             // Check for NUL-spill: data claims to extend beyond what was sent

@@ -47,7 +47,8 @@ public object UltraHardenedParser {
      * @param limits Resource limits to enforce during parsing.
      * @return Bytes consumed on success (header + terminators - 1, callers advance by this value + 1),
      * or -1 if the header is incomplete and more data is needed.
-     * @throws HttpParseException Thrown on any protocol or semantic violation.
+     * @throws HttpParseException Thrown on any protocol or semantic violation, and with 431 for an incomplete header
+     * that already holds [ParserLimits.maxTotalHeaderBytes] bytes.
      */
     public fun tryExtractFullHeader(
         input: ByteBuffer,
@@ -57,7 +58,7 @@ public object UltraHardenedParser {
         val span = ByteSpan(input, request.views)
 
         val headerEnd = span.indexOf(ParserConstants.CrlfCrlf)
-        if (headerEnd < 0) return -1
+        if (headerEnd < 0) return incomplete(span, limits)
 
         val totalHeaderBytes = headerEnd + 4
         if (totalHeaderBytes > limits.maxTotalHeaderBytes)
@@ -228,7 +229,7 @@ public object UltraHardenedParser {
         val span = ByteSpan(input)
 
         val headerEnd = span.indexOf(ParserConstants.CrlfCrlf)
-        if (headerEnd < 0) return -1
+        if (headerEnd < 0) return incomplete(span, limits)
 
         val totalHeaderBytes = headerEnd + 4
         if (totalHeaderBytes > limits.maxTotalHeaderBytes)
@@ -311,6 +312,16 @@ public object UltraHardenedParser {
         parseHeaders(span, statusLineEnd + 2, limits, response.headers, false)
 
         return totalHeaderBytes - 1
+    }
+
+    /**
+     * No CRLFCRLF yet: -1, for more data, unless the input already holds [ParserLimits.maxTotalHeaderBytes]. The
+     * head would then end past the limit whatever arrives, so it is refused now rather than buffered forever.
+     */
+    private fun incomplete(span: ByteSpan, limits: ParserLimits): Int {
+        if (span.length >= limits.maxTotalHeaderBytes)
+            throw HttpParseException("Total header size exceeds limit.", statusCode = 431)
+        return -1
     }
 
     // =====================================================================
