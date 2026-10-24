@@ -53,35 +53,40 @@ internal object Ascii {
     }
 
     // ---- words: eight bytes, little endian, the byte at the lowest index in the low bits ----
+    //
+    // The helpers the fast path calls are inline functions, copied into it by kotlinc: left to C2, a call can be
+    // judged too rare to inline once the profile is mature (seen for word and controls inside firstControl, which
+    // then cost a call through the VarHandle per header line, 25 -> 35 ns per GET).
 
-    private val LONGS: VarHandle = MethodHandles.byteArrayViewVarHandle(LongArray::class.java, ByteOrder.LITTLE_ENDIAN)
+    @JvmField
+    internal val LONGS: VarHandle = MethodHandles.byteArrayViewVarHandle(LongArray::class.java, ByteOrder.LITTLE_ENDIAN)
 
     /** The eight bytes at [at]; `at + 8 <= a.size`. */
-    @JvmStatic
-    fun word(a: ByteArray, at: Int): Long = LONGS.get(a, at) as Long
+    @Suppress("NOTHING_TO_INLINE")
+    inline fun word(a: ByteArray, at: Int): Long = LONGS.get(a, at) as Long
 
-    private const val ONES: Long = 0x0101010101010101L
-    private const val HIGHS: Long = -0x7f7f7f7f7f7f7f80L // 0x8080808080808080
-    private const val SPACES: Long = 0x2020202020202020L
-    private const val DELS: Long = 0x7f7f7f7f7f7f7f7fL
+    internal const val ONES: Long = 0x0101010101010101L
+    internal const val HIGHS: Long = -0x7f7f7f7f7f7f7f80L // 0x8080808080808080
+    internal const val SPACES: Long = 0x2020202020202020L
+    internal const val DELS: Long = 0x7f7f7f7f7f7f7f7fL
 
     /** The high bit of each zero byte of [x]; as in [controls], only the lowest one is exact. */
-    @JvmStatic
-    fun zeroBytes(x: Long): Long = (x - ONES) and x.inv() and HIGHS
+    @Suppress("NOTHING_TO_INLINE")
+    inline fun zeroBytes(x: Long): Long = (x - ONES) and x.inv() and HIGHS
 
     /**
      * The high bit of each byte below 0x20 or equal to 0x7F (a byte no field value holds, but for HTAB). Borrows
      * can flag bytes above a flagged one, never below: the lowest flag is exact, which is all a scan reads.
      */
-    @JvmStatic
-    fun controls(w: Long): Long = ((w - SPACES) and w.inv() and HIGHS) or zeroBytes(w xor DELS)
+    @Suppress("NOTHING_TO_INLINE")
+    inline fun controls(w: Long): Long = ((w - SPACES) and w.inv() and HIGHS) or zeroBytes(w xor DELS)
 
     /**
      * The index of the first byte in `[from, limit)` below 0x20 or equal to 0x7F, or [limit] if there is none. Reads
      * whole words up to the end of the array, past [limit]: what it finds there is not reported.
      */
-    @JvmStatic
-    fun firstControl(a: ByteArray, from: Int, limit: Int): Int {
+    @Suppress("NOTHING_TO_INLINE")
+    inline fun firstControl(a: ByteArray, from: Int, limit: Int): Int {
         var i = from
         val lastWord = a.size - 8
         while (i < limit && i <= lastWord) {

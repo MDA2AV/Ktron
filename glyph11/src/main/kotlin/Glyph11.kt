@@ -305,13 +305,16 @@ internal object FastParser {
         return 0
     }
 
-    private fun fold(b: Byte): Int = b.toInt() or 0x20
+    // inline, as Ascii's word helpers are: C2 must not leave the per-line checks out of line
+    @Suppress("NOTHING_TO_INLINE")
+    private inline fun fold(b: Byte): Int = b.toInt() or 0x20
 
     private const val ATS: Long = 0x4040404040404040L
     private const val SLASHES: Long = 0x2f2f2f2f2f2f2f2fL
 
     /** `[v, e)` holds an '@' or a '/': eight bytes at a time, then byte by byte. */
-    private fun hasAtOrSlash(a: ByteArray, v: Int, e: Int): Boolean {
+    @Suppress("NOTHING_TO_INLINE")
+    private inline fun hasAtOrSlash(a: ByteArray, v: Int, e: Int): Boolean {
         var i = v
         while (i + 8 <= e) {
             val w = Ascii.word(a, i)
@@ -344,18 +347,22 @@ internal object FastParser {
         fold(a[at]) == 'o'.code && fold(a[at + 1]) == 'p'.code && fold(a[at + 2]) == 't'.code && fold(a[at + 3]) == 'i'.code &&
             fold(a[at + 4]) == 'o'.code && fold(a[at + 5]) == 'n'.code && fold(a[at + 6]) == 's'.code
 
-    private fun isHost(a: ByteArray, at: Int): Boolean =
+    @Suppress("NOTHING_TO_INLINE")
+    private inline fun isHost(a: ByteArray, at: Int): Boolean =
         fold(a[at]) == 'h'.code && fold(a[at + 1]) == 'o'.code && fold(a[at + 2]) == 's'.code && fold(a[at + 3]) == 't'.code
 
     // a 14-byte name followed by ':' and its line: both words are inside the array
-    private fun isContentLength(a: ByteArray, at: Int): Boolean =
+    @Suppress("NOTHING_TO_INLINE")
+    private inline fun isContentLength(a: ByteArray, at: Int): Boolean =
         (Ascii.word(a, at) or FOLD) == CONTENT_ && (Ascii.word(a, at + 6) or FOLD) == T_LENGTH
 
-    private fun isTransferEncoding(a: ByteArray, at: Int): Boolean =
+    @Suppress("NOTHING_TO_INLINE")
+    private inline fun isTransferEncoding(a: ByteArray, at: Int): Boolean =
         (Ascii.word(a, at) or FOLD) == TRANSFER && (Ascii.word(a, at + 8) or FOLD) == _ENCODIN && fold(a[at + 16]) == 'g'.code
 
     /** `[v, e)`, its leading OWS skipped already, is "chunked" once its trailing OWS is trimmed. */
-    private fun isChunked(a: ByteArray, v: Int, e: Int): Boolean {
+    @Suppress("NOTHING_TO_INLINE")
+    private inline fun isChunked(a: ByteArray, v: Int, e: Int): Boolean {
         var end = e
         while (end > v && (a[end - 1].toInt() == SP || a[end - 1].toInt() == HTAB)) end--
         return end - v == 7 &&
@@ -363,9 +370,11 @@ internal object FastParser {
             fold(a[v + 4]) == 'k'.code && fold(a[v + 5]) == 'e'.code && fold(a[v + 6]) == 'd'.code
     }
 
-    private fun isDigit(b: Byte): Boolean = b >= '0'.code.toByte() && b <= '9'.code.toByte()
+    @Suppress("NOTHING_TO_INLINE")
+    private inline fun isDigit(b: Byte): Boolean = b >= '0'.code.toByte() && b <= '9'.code.toByte()
 
-    private fun isOws(b: Byte): Boolean = b == SP.toByte() || b == HTAB.toByte()
+    @Suppress("NOTHING_TO_INLINE")
+    private inline fun isOws(b: Byte): Boolean = b == SP.toByte() || b == HTAB.toByte()
 
     private val ULONG_MAX = "18446744073709551615".toByteArray(Charsets.US_ASCII)
 
@@ -375,17 +384,25 @@ internal object FastParser {
      * BodyFramingDetector frames it as, those digits as a Long, -1 (no body) when they overflow one or OWS stands
      * between them and the first comma.
      */
-    private fun contentLengthOf(a: ByteArray, v: Int, e: Int): Long {
+    @Suppress("NOTHING_TO_INLINE")
+    private inline fun contentLengthOf(a: ByteArray, v: Int, e: Int): Long {
         if (v >= e || !isDigit(a[v])) return CL_INVALID
         var p = v + 1
+        // the digits' value as BodyFramingDetector reads them (HeadFraming.leadingDigits): -1 once a step overflows
+        var framing = (a[v] - '0'.code.toByte()).toLong()
         if (a[v] == '0'.code.toByte()) {
             if (p < e && isDigit(a[p])) return CL_INVALID
         } else {
-            while (p < e && isDigit(a[p])) p++
+            while (p < e && isDigit(a[p])) {
+                if (framing >= 0) {
+                    framing = framing * 10 + (a[p] - '0'.code.toByte())
+                    if (framing < 0) framing = -1
+                }
+                p++
+            }
         }
         val digits = p - v
         if (digits > 20 || (digits == 20 && aboveUlongMax(a, v))) return CL_INVALID
-        var framing = HeadFraming.leadingDigits(a, v, p)
         var q = p
         while (q < e && isOws(a[q])) q++
         if (q < e) {
