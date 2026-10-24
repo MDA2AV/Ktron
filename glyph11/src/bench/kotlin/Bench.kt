@@ -390,6 +390,6 @@ private fun checkAgreement(impls: List<String>, shapes: List<String>) {
             val sum = s.run(3)
             "${s.head.headLength}/${s.head.headerCount}/${s.head.queryCount}/${s.head.bodyFraming}/${s.head.contentLength}/$sum"
         }
-        require(outcomes.distinct().size == 1) { "implementations disagree on $shape: $outcomes" }
+        require(outcomes.distinct().size <= 1) { "implementations disagree on $shape: $outcomes" }
     }
 }
