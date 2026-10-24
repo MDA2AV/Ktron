@@ -9,6 +9,7 @@ import ioxide.TcpConnection
 import ioxide.tls.TlsService
 import ioxide.tls.TlsSession
 import ktron.glyph11.ByteBuilder
+import ktron.glyph11.ChunkedDecoder
 import ktron.glyph11.Glyph11
 import ktron.glyph11.HttpParseException
 import ktron.glyph11.RequestHead
@@ -37,6 +38,8 @@ internal class Http1Connection(private val state: ReactorState) {
     private var consumed = 0
     private val head = RequestHead()
     private val chunked = ByteBuilder()
+    // A chunked body that trickles in is decoded once, each read going on where the last stopped.
+    private val chunkedDecoder = ChunkedDecoder()
     internal val scratch = Buffer(0)
     private val ctx = Context(this)
     private var timerInstance: RingTimer? = null
@@ -100,6 +103,7 @@ internal class Http1Connection(private val state: ReactorState) {
     internal fun recycle() {
         carry.reset()
         consumed = 0
+        chunkedDecoder.reset()
         continued = false
         pendingRoute = null
         ctx.reset()
@@ -138,7 +142,7 @@ internal class Http1Connection(private val state: ReactorState) {
                 }
                 RequestHead.BODY_CHUNKED -> {
                     val wire = try {
-                        Glyph11.decodeChunked(input, start + headLength, available - headLength, chunked)
+                        chunkedDecoder.decode(input, start + headLength, available - headLength, chunked)
                     } catch (e: HttpParseException) {
                         return refuse(e.statusCode)
                     }

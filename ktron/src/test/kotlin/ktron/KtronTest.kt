@@ -225,6 +225,25 @@ class KtronTest {
         assertEquals("close", smuggled.headers["connection"])
         assertEquals(431, exchange(port, "GET /x HTTP/1.1\r\nHost: t\r\nX-Big: " + "a".repeat(40_000) + "\r\n\r\n")[0].status)
         assertEquals(413, exchange(port, "POST /x HTTP/1.1\r\nHost: t\r\nContent-Length: 2000000\r\n\r\n")[0].status)
+        // past what a Long holds: too large, not no body
+        assertEquals(413, exchange(port, "POST /x HTTP/1.1\r\nHost: t\r\nContent-Length: 9223372036854775808\r\n\r\n")[0].status)
+    }
+
+    @Test
+    fun `a chunked body that trickles in is decoded, and a listed Content-Length frames its body`() = withApp({ app ->
+        app.post("/echo") { ctx -> ctx.response.bytes(ctx.request.bodyBytes, ctx.request.bodyOffset, ctx.request.bodyLength) }
+        app.get("/x") { ctx -> ctx.response.text("x") }
+    }) { port ->
+        // A request answered first, so the partial body moves to the buffer's start while it is still arriving.
+        val payload = (0 until 200).joinToString("") { (it % 100).toString().padStart(2, '0') }
+        val body = payload.chunked(2).joinToString("") { "2\r\n$it\r\n" } + "0\r\n\r\n"
+        val first = get("/x") + "POST /echo HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked\r\n\r\n"
+        val replies = exchange(port, first, *body.chunked(7).toTypedArray(), responses = 2, pauseMs = 1)
+        assertEquals(listOf("x", payload), replies.map { it.body })
+
+        // "5 ,5" lists 5 twice: those 5 bytes are its body, not the start of the next request
+        val listed = exchange(port, "POST /echo HTTP/1.1\r\nHost: t\r\nContent-Length: 5 ,5\r\n\r\nhello" + get("/x"), responses = 2)
+        assertEquals(listOf("hello", "x"), listed.map { it.body })
     }
 
     @Test
