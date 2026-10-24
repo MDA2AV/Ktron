@@ -36,99 +36,14 @@ public object Glyph11 {
      * Decodes the chunked body at `[offset, offset + length)` of [input], appending its payload to [into], and returns
      * the bytes its framing occupied; 0 when it has not all arrived (what [into] then holds is not the body). Throws
      * [HttpParseException] for malformed framing, ChunkedBodyStream's checks in their order, and for a chunk size of
-     * 2^63 or more.
+     * 2^63 or more. Each call decodes the body from its first byte: [ChunkedDecoder] goes on from the last call's end.
      */
     public fun decodeChunked(input: ByteArray, offset: Int, length: Int, into: ByteBuilder): Int {
         Objects.checkFromIndexSize(offset, length, input.size)
         into.reset()
-        val end = offset + length
-        val hex = Ascii.HEX
-        var pos = offset
-        while (true) {
-            // ---- chunk-size [; extension] CRLF ----
-            if (pos >= end) return 0
-            var size = 0L
-            var digits = 0
-            var c: Int
-            while (true) {
-                c = input[pos].toInt() and 0xFF
-                val h = hex[c].toInt()
-                if (h < 0) break
-                if (digits >= 16) refuse(Refusals.CHUNK_OVERFLOW)
-                size = (size shl 4) or h.toLong()
-                // 16 digits reach 2^64 - 1, a negative Long: refused, not cut to its low bits
-                if (size < 0) refuse(Refusals.CHUNK_OVERFLOW)
-                digits++
-                if (++pos >= end) return 0
-            }
-            if (digits == 0) {
-                if (c == SP || c == HTAB) refuse(Refusals.CHUNK_LEADING_WHITESPACE)
-                if (c == '-'.code) refuse(Refusals.CHUNK_NEGATIVE)
-                refuse(Refusals.CHUNK_SIZE_CHARACTER)
-            }
-            if (digits == 1 && size == 0L && (c == 'x'.code || c == 'X'.code)) refuse(Refusals.CHUNK_HEX_PREFIX)
-            if (c == '_'.code) refuse(Refusals.CHUNK_UNDERSCORE)
-            if (c == ';'.code) {
-                pos++
-                var extension = 0
-                while (true) {
-                    if (pos >= end) return 0
-                    val e = input[pos].toInt()
-                    if (extension > MAX_CHUNK_EXTENSION) refuse(Refusals.CHUNK_EXTENSION_TOO_LARGE)
-                    if (e == 0) refuse(Refusals.CHUNK_EXTENSION_NUL)
-                    if (e == LF) refuse(Refusals.CHUNK_EXTENSION_BARE_LF)
-                    if (e == CR) {
-                        if (extension == 0) refuse(Refusals.CHUNK_BARE_SEMICOLON)
-                        break
-                    }
-                    extension++
-                    pos++
-                }
-            } else if (c == LF) {
-                refuse(Refusals.CHUNK_SIZE_BARE_LF)
-            } else if (c != CR) {
-                refuse(Refusals.CHUNK_SIZE_CRLF)
-            }
-            // the CR at pos, then its LF
-            if (++pos >= end) return 0
-            if (input[pos].toInt() != LF) refuse(Refusals.CHUNK_SIZE_CRLF)
-            pos++
-
-            if (size == 0L) {
-                // ---- trailer lines up to an empty line ----
-                while (true) {
-                    if (pos >= end) return 0
-                    if (pos + 1 < end && input[pos].toInt() == CR && input[pos + 1].toInt() == LF) return pos + 2 - offset
-                    if (input[pos].toInt() == LF) refuse(Refusals.TRAILER_BARE_LF)
-                    while (true) {
-                        if (pos >= end) return 0
-                        val t = input[pos].toInt()
-                        if (t == LF && input[pos - 1].toInt() != CR) refuse(Refusals.TRAILER_BARE_LF)
-                        if (t == CR && pos + 1 < end && input[pos + 1].toInt() == LF) {
-                            pos += 2
-                            break
-                        }
-                        pos++
-                    }
-                }
-            }
-
-            // ---- chunk-data CRLF ----
-            if (size > end - pos) return 0
-            val data = pos
-            pos += size.toInt()
-            if (pos + 1 >= end) return 0
-            val d = input[pos].toInt()
-            if (d == LF && input[pos - 1].toInt() != CR) refuse(Refusals.CHUNK_DATA_BARE_LF)
-            if (d != CR || input[pos + 1].toInt() != LF) refuse(Refusals.CHUNK_DATA_CRLF)
-            pos += 2
-            into.append(input, data, size.toInt())
-        }
+        val end = Chunked.decode(input, offset, offset + length, into)
+        return if (end >= 0) end - offset else 0
     }
-
-    private const val MAX_CHUNK_EXTENSION = 4096
-
-    private fun refuse(code: Int): Nothing = throw Refusals.exception(code)
 }
 
 /**
