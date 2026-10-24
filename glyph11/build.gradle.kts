@@ -15,6 +15,10 @@ dependencies {
 
 tasks.test {
     useJUnitPlatform()
+    // -Pglyph11.fuzz.iterations=N -Pglyph11.fuzz.seed=S: a longer run of the fuzz tests, or another one
+    for (name in listOf("glyph11.fuzz.iterations", "glyph11.fuzz.seed")) {
+        providers.gradleProperty(name).orNull?.let { systemProperty(name, it) }
+    }
 }
 
 // ---- Benchmarks: src/bench, a main per tool, run outside Gradle's JVM so it can be pinned to a CPU ----

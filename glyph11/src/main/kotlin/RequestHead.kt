@@ -40,7 +40,8 @@ public class RequestHead {
 
     public var headerCount: Int = 0
         internal set
-    private var headers = IntArray(4 * 16)
+    // name start, name length, value start, value length per header; the parser writes it directly
+    internal var headers = IntArray(4 * 16)
 
     public fun headerNameStart(i: Int): Int = headers[4 * i]
     public fun headerNameLength(i: Int): Int = headers[4 * i + 1]
@@ -49,7 +50,8 @@ public class RequestHead {
 
     public var queryCount: Int = 0
         internal set
-    private var query = IntArray(4 * 8)
+    // key start, key length, value start, value length per parameter; the parser writes it directly
+    internal var query = IntArray(4 * 8)
 
     public fun queryKeyStart(i: Int): Int = query[4 * i]
     public fun queryKeyLength(i: Int): Int = query[4 * i + 1]
