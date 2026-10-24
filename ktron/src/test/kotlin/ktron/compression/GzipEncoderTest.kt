@@ -68,6 +68,12 @@ class GzipEncoderTest {
     }
 
     @Test
+    fun `a missing library is a LinkageError that names its package`() {
+        val e = assertFailsWith<UnsatisfiedLinkError> { library("libktron-absent.so.0", "ktron-absent") }
+        assertTrue("ktron-absent" in e.message!!, e.message)
+    }
+
+    @Test
     fun `the zlib fallback round-trips at every level`() {
         for (level in 0..9) DeflaterGzipEncoder(level).use { e ->
             for (b in bodies) roundTrip(e, b)
@@ -75,5 +81,8 @@ class GzipEncoderTest {
             roundTrip(e, random(70_000))
         }
         assertFailsWith<IllegalArgumentException> { DeflaterGzipEncoder(10) }
+        val closed = DeflaterGzipEncoder().also { it.close() }
+        closed.close()
+        assertFailsWith<IllegalStateException> { closed.encode(bodies[0], 0, bodies[0].size, ByteBuilder()) }
     }
 }

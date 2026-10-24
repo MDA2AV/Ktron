@@ -22,20 +22,26 @@ import java.util.Objects
 class BrotliEncoder(val quality: Int = 0, val lgwin: Int = 22) : ContentEncoder, AutoCloseable {
     override val name: String get() = "br"
 
+    // Before any property allocates: a refused setting must not leak.
+    init {
+        require(quality in 0..11) { "brotli's qualities are 0-11, not $quality" }
+        require(lgwin in 10..24) { "brotli's lgwin is 10-24, not $lgwin" }
+    }
+
     private val source = NativeBuffer()
     private val target = NativeBuffer()
     private var scratch = ByteArray(0)
     private var open = true
 
-    // BrotliEncoderCompress's in/out size_t.
-    private val encodedSize = Libc.malloc(8)
-
     // The longest input the target buffer holds the BrotliEncoderMaxCompressedSize of.
     private var fits = -1
 
+    // BrotliEncoderCompress's in/out size_t.
+    private val encodedSize: Long
+
     init {
-        require(quality in 0..11) { "brotli's qualities are 0-11, not $quality" }
-        require(lgwin in 10..24) { "brotli's lgwin is 10-24, not $lgwin" }
+        reserve(0) // libbrotlienc loads here, as libdeflate does in GzipEncoder, not on the first body
+        encodedSize = Libc.malloc(8)
     }
 
     override fun encode(input: ByteArray, offset: Int, length: Int, output: ByteBuilder): Int {

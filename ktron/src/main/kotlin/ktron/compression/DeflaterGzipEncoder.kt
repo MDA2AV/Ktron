@@ -15,16 +15,18 @@ import java.util.zip.Deflater
 class DeflaterGzipEncoder(val level: Int = 3) : ContentEncoder, AutoCloseable {
     override val name: String get() = "gzip"
 
-    private val deflater = Deflater(level, true)
-    private val crc = CRC32()
-    private var scratch = ByteArray(16 * 1024)
-
     init {
         require(level in 0..9) { "zlib's levels are 0-9, not $level" }
     }
 
+    private val deflater = Deflater(level, true)
+    private val crc = CRC32()
+    private var scratch = ByteArray(16 * 1024)
+    private var open = true
+
     override fun encode(input: ByteArray, offset: Int, length: Int, output: ByteBuilder): Int {
         Objects.checkFromIndexSize(offset, length, input.size)
+        check(open) { "closed" }
         // zlib's deflateBound for raw deflate, plus the gzip framing: one deflate call fits whatever the input.
         val bound = 10 + length + (length shr 12) + (length shr 14) + (length shr 25) + 13 + 8
         if (scratch.size < bound) scratch = ByteArray(maxOf(bound, scratch.size * 2))
@@ -64,6 +66,7 @@ class DeflaterGzipEncoder(val level: Int = 3) : ContentEncoder, AutoCloseable {
     }
 
     override fun close() {
+        open = false
         deflater.end()
     }
 }
