@@ -51,7 +51,7 @@ data class Item(val id: Int, val name: String)
 - `glyph11/` the parser
 - `examples/arena/` HttpArena's HTTP/1.1 profiles on Ktron
 
-The runtime is `kotlin/ioxide` of an ioxide checkout next to this one (`-PioxideKt=<dir>` points elsewhere).
-Build with `./gradlew build`; JDK 25.
+The runtime is ioxide's Kotlin port: check out the ioxide repo's `kotlin` branch next to this one, or point
+`-PioxideKt=<dir>` at its `kotlin/ioxide` elsewhere. Build with `./gradlew build`; JDK 25.
 
 MIT.
