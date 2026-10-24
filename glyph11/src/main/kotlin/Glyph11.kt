@@ -380,23 +380,23 @@ internal object FastParser {
 
     /**
      * A Content-Length value `[v, e)`, its leading OWS skipped: [CL_INVALID] unless UltraHardenedParser accepts it,
-     * 1*DIGIT without a leading zero and at most 2^64 - 1, its comma-separated copies all the same digits; else what
-     * BodyFramingDetector frames it as, those digits as a Long, -1 (no body) when they overflow one or OWS stands
-     * between them and the first comma.
+     * 1*DIGIT without a leading zero and at most 2^64 - 1, its comma-separated copies all the same digits; else those
+     * digits as a Long, held at Long.MAX_VALUE from 2^63 up.
      */
     @Suppress("NOTHING_TO_INLINE")
     private inline fun contentLengthOf(a: ByteArray, v: Int, e: Int): Long {
         if (v >= e || !isDigit(a[v])) return CL_INVALID
         var p = v + 1
-        // the digits' value as BodyFramingDetector reads them (HeadFraming.leadingDigits): -1 once a step overflows
+        // a length past 2^63 - 1 is longer than any body may be: held at Long.MAX_VALUE, so it is refused as too large
+        // rather than framed as no body, which would read the body as the next request
         var framing = (a[v] - '0'.code.toByte()).toLong()
         if (a[v] == '0'.code.toByte()) {
             if (p < e && isDigit(a[p])) return CL_INVALID
         } else {
             while (p < e && isDigit(a[p])) {
-                if (framing >= 0) {
+                if (framing != Long.MAX_VALUE) {
                     framing = framing * 10 + (a[p] - '0'.code.toByte())
-                    if (framing < 0) framing = -1
+                    if (framing < 0) framing = Long.MAX_VALUE
                 }
                 p++
             }
@@ -406,7 +406,6 @@ internal object FastParser {
         var q = p
         while (q < e && isOws(a[q])) q++
         if (q < e) {
-            if (q > p) framing = -1
             while (true) {
                 if (a[q] != ','.code.toByte()) return CL_INVALID
                 q++

@@ -277,8 +277,8 @@ internal object ExactParser {
 
 /**
  * BodyFramingDetector.detectBodyFraming over a parsed [RequestHead]: chunked if a Transfer-Encoding is "chunked",
- * else the last Content-Length's leading digits when they are positive, else no body. It keeps the detector's
- * reading of the value exactly: the digits before the first comma, so `5 ,5` (a space before the comma) is no body.
+ * else the last Content-Length's leading digits when they are positive, else no body: the digits before the first
+ * comma and the OWS before it, so `5 ,5` is 5.
  */
 internal object HeadFraming {
     private val TE = "transfer-encoding".toByteArray(Charsets.US_ASCII)
@@ -309,7 +309,9 @@ internal object HeadFraming {
         }
         if (clStart >= 0 && clEnd > clStart) {
             val comma = Ascii.indexOf(a, ','.code, clStart, clEnd)
-            val value = leadingDigits(a, clStart, if (comma >= 0) comma else clEnd)
+            var to = if (comma >= 0) comma else clEnd
+            while (to > clStart && isOws(a[to - 1].toInt())) to--
+            val value = leadingDigits(a, clStart, to)
             if (value > 0) {
                 head.bodyFraming = RequestHead.BODY_LENGTH
                 head.contentLength = value
@@ -319,7 +321,10 @@ internal object HeadFraming {
         head.bodyFraming = RequestHead.BODY_NONE
     }
 
-    /** `[from, to)` as a decimal number, -1 if it is empty, holds a non-digit, or overflows a Long. */
+    /**
+     * `[from, to)` as a decimal number, -1 if it is empty or holds a non-digit, Long.MAX_VALUE from 2^63 up: longer
+     * than any body may be, so refused rather than read as no body.
+     */
     @JvmStatic
     fun leadingDigits(a: ByteArray, from: Int, to: Int): Long {
         if (to == from) return -1
@@ -328,7 +333,10 @@ internal object HeadFraming {
             val d = a[j] - '0'.code.toByte()
             if (d < 0 || d > 9) return -1
             result = result * 10 + d
-            if (result < 0) return -1
+            if (result < 0) {
+                for (k in j + 1 until to) if (a[k] < '0'.code.toByte() || a[k] > '9'.code.toByte()) return -1
+                return Long.MAX_VALUE
+            }
         }
         return result
     }

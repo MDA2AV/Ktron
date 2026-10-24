@@ -135,10 +135,12 @@ public object BodyFramingDetector {
         val span = ByteSpan(input)
         var length = span.length
 
-        // Handle comma-separated: take first segment
+        // Handle comma-separated: take first segment, without the OWS before its comma ("5 ,5" is 5)
         val comma = span.indexOfByte(','.code, 0, length)
         if (comma >= 0)
             length = comma
+        while (length > 0 && (span.at(length - 1) == ' '.code || span.at(length - 1) == '\t'.code))
+            length--
 
         if (length == 0) return -1
 
@@ -147,7 +149,11 @@ public object BodyFramingDetector {
             val b = span.at(j)
             if (b < '0'.code || b > '9'.code) return -1
             result = result * 10 + (b - '0'.code)
-            if (result < 0) return -1 // overflow
+            // 2^63 and up: longer than any body may be, so refused as too large rather than read as no body
+            if (result < 0) {
+                for (k in j + 1 until length) if (span.at(k) < '0'.code || span.at(k) > '9'.code) return -1
+                return Long.MAX_VALUE
+            }
         }
 
         return result

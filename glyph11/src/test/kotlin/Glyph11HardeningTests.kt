@@ -6,6 +6,8 @@ import ktron.glyph11.parser.ParserLimits
 import ktron.glyph11.parser.ultrahardened.UltraHardenedParser
 import ktron.glyph11.protocol.BinaryRequest
 import ktron.glyph11.protocol.BinaryResponse
+import ktron.glyph11.validation.BodyFraming
+import ktron.glyph11.validation.BodyFramingDetector
 import ktron.glyph11.validation.ChunkedBodyValidator
 import java.nio.ByteBuffer
 import kotlin.test.Test
@@ -115,5 +117,39 @@ class Glyph11HardeningTests {
         assertEquals(ChunkResult.NeedMoreData, ChunkedBodyStream().tryReadChunk(ByteBuffer.wrap(huge)))
         // the validator added the size to its position and overflowed: it took the chunk's data for the next size line
         assertEquals(-1, ChunkedBodyValidator.tryValidate(ByteBuffer.wrap(huge)))
+    }
+
+    // ---- a Content-Length the checks accept frames that length: framed as no body, the body would be read as the
+    // next request ----
+
+    // value -> the length it frames
+    private val listedLengths = listOf(
+        "5 ,5" to 5L, "5\t, 5" to 5L, "5 , 5 " to 5L, "5 ,5\r\nContent-Length: 5 ,5" to 5L,
+        "9223372036854775807" to Long.MAX_VALUE,
+        "9223372036854775808" to Long.MAX_VALUE, "9999999999999999999" to Long.MAX_VALUE,
+        "18446744073709551615" to Long.MAX_VALUE, "9223372036854775808, 9223372036854775808" to Long.MAX_VALUE,
+    )
+
+    @Test
+    fun `OWS before a list's comma and lengths of 2^63 and up still frame a length`() {
+        for ((value, length) in listedLengths) {
+            val request = bytes("POST / HTTP/1.1\r\nHost: x\r\nContent-Length: $value\r\n\r\n")
+            val head = RequestHead()
+            assertEquals(request.size, Glyph11.parse(request, 0, request.size, head), value)
+            assertEquals(RequestHead.BODY_LENGTH, head.bodyFraming, value)
+            assertEquals(length, head.contentLength, value)
+        }
+    }
+
+    @Test
+    fun `the ByteBuffer API frames them the same`() {
+        for ((value, length) in listedLengths) {
+            val request = BinaryRequest()
+            val bytes = ByteBuffer.wrap(bytes("POST / HTTP/1.1\r\nHost: x\r\nContent-Length: $value\r\n\r\n"))
+            UltraHardenedParser.tryExtractFullHeader(bytes, request, ParserLimits.Default)
+            val framing = BodyFramingDetector.detectBodyFraming(request)
+            assertEquals(BodyFraming.ContentLength, framing.framing, value)
+            assertEquals(length, framing.contentLength, value)
+        }
     }
 }
