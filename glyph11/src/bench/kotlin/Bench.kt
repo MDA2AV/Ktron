@@ -220,7 +220,20 @@ internal val SHAPES = listOf(
 internal fun applies(impl: String, shape: String): Boolean = shape != "chunked_trickle_resume" || impl == "kotlin"
 internal val IMPLS = listOf("adapter", "kotlin", "native")
 
+/**
+ * The C core's call alone: the downcall and its status, the head's length, and no span read back into the
+ * RequestHead. Not a parser Ktron could use; it splits the native column's cost in two.
+ */
+internal class NativeCallParser : Parser() {
+    private val native = NativeParser()
+    override fun parse(input: ByteArray, offset: Int, length: Int, head: RequestHead): Int =
+        if (native.status(input, offset, length) == NativeGlyph11.OK) native.consumedLength() else 0
+    override fun decodeChunked(input: ByteArray, offset: Int, length: Int, into: ByteBuilder): Int =
+        native.decodeChunked(input, offset, length, into)
+}
+
 internal fun parserFor(impl: String): Parser = when (impl) {
+    "native_call" -> NativeCallParser()
     "adapter" -> AdapterParser()
     "kotlin" -> KotlinParser()
     "native" -> NativeParser()
@@ -329,9 +342,9 @@ fun main(args: Array<String>) {
         }
         i++
     }
-    if ("native" in impls && !NativeGlyph11.available) {
+    if (impls.any { it.startsWith("native") } && !NativeGlyph11.available) {
         System.err.println("no C core (-Dglyph11.lib=<libglyph11.so>), skipping native")
-        impls = impls - "native"
+        impls = impls.filterNot { it.startsWith("native") }
     }
 
     checkAgreement(impls, shapes)
@@ -371,7 +384,8 @@ fun main(args: Array<String>) {
 /** Every implementation must agree on what each shape parses to before its speed means anything. */
 private fun checkAgreement(impls: List<String>, shapes: List<String>) {
     for (shape in shapes) {
-        val outcomes = impls.filter { applies(it, shape) }.map { impl ->
+        // native_call fills no head: it is compared on nothing
+        val outcomes = impls.filter { applies(it, shape) && it != "native_call" }.map { impl ->
             val s = shapeFor(shape, parserFor(impl))
             val sum = s.run(3)
             "${s.head.headLength}/${s.head.headerCount}/${s.head.queryCount}/${s.head.bodyFraming}/${s.head.contentLength}/$sum"

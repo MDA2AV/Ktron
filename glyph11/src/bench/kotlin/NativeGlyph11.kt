@@ -165,6 +165,9 @@ internal class NativeParser(private val limits: ParserLimits = ParserLimits.Defa
         ) as Int
     }
 
+    /** The head length the core reported for the last parse that returned OK. */
+    fun consumedLength(): Int = consumed.get(JAVA_LONG, 0).toInt()
+
     override fun parse(input: ByteArray, offset: Int, length: Int, head: RequestHead): Int {
         head.reset()
         val status = status(input, offset, length)
