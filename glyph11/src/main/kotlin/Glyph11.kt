@@ -7,10 +7,7 @@ import ktron.glyph11.Ascii.PATH
 import ktron.glyph11.Ascii.QUERY
 import ktron.glyph11.Ascii.SP
 import ktron.glyph11.Ascii.TOKEN
-import ktron.glyph11.parser.ChunkResult
-import ktron.glyph11.parser.ChunkedBodyStream
 import ktron.glyph11.parser.ParserLimits
-import java.nio.ByteBuffer
 import java.util.Objects
 
 /**
@@ -33,25 +30,99 @@ public object Glyph11 {
 
     /**
      * Decodes the chunked body at `[offset, offset + length)` of [input], appending its payload to [into], and returns
-     * the bytes its framing occupied; 0 when it has not all arrived. Throws [HttpParseException] for malformed framing.
+     * the bytes its framing occupied; 0 when it has not all arrived (what [into] then holds is not the body). Throws
+     * [HttpParseException] for malformed framing, ChunkedBodyStream's checks in their order, and for a chunk size of
+     * 2^63 or more.
      */
     public fun decodeChunked(input: ByteArray, offset: Int, length: Int, into: ByteBuilder): Int {
+        Objects.checkFromIndexSize(offset, length, input.size)
         into.reset()
-        val stream = ChunkedBodyStream()
-        var at = offset
         val end = offset + length
+        val hex = Ascii.HEX
+        var pos = offset
         while (true) {
-            val view = ByteBuffer.wrap(input, at, end - at)
-            when (stream.tryReadChunk(view)) {
-                ChunkResult.NeedMoreData -> return 0
-                ChunkResult.Chunk -> {
-                    into.append(input, at + stream.dataOffset, stream.dataLength)
-                    at += stream.bytesConsumed
-                }
-                ChunkResult.Completed -> return at + stream.bytesConsumed - offset
+            // ---- chunk-size [; extension] CRLF ----
+            if (pos >= end) return 0
+            var size = 0L
+            var digits = 0
+            var c: Int
+            while (true) {
+                c = input[pos].toInt() and 0xFF
+                val h = hex[c].toInt()
+                if (h < 0) break
+                if (digits >= 16) throw HttpParseException("Chunk size overflow.")
+                size = (size shl 4) or h.toLong()
+                // 16 digits reach 2^64 - 1, a negative Long: refused, not cut to its low bits
+                if (size < 0) throw HttpParseException("Chunk size overflow.")
+                digits++
+                if (++pos >= end) return 0
             }
+            if (digits == 0) {
+                if (c == SP || c == HTAB) throw HttpParseException("Leading whitespace in chunk size.")
+                if (c == '-'.code) throw HttpParseException("Negative chunk size.")
+                throw HttpParseException("Invalid character in chunk size.")
+            }
+            if (digits == 1 && size == 0L && (c == 'x'.code || c == 'X'.code)) throw HttpParseException("Hex prefix in chunk size.")
+            if (c == '_'.code) throw HttpParseException("Underscore in chunk size.")
+            if (c == ';'.code) {
+                pos++
+                var extension = 0
+                while (true) {
+                    if (pos >= end) return 0
+                    val e = input[pos].toInt()
+                    if (extension > MAX_CHUNK_EXTENSION) throw HttpParseException("Chunk extension too large.")
+                    if (e == 0) throw HttpParseException("NUL byte in chunk extension.")
+                    if (e == LF) throw HttpParseException("Bare LF in chunk extension.")
+                    if (e == CR) {
+                        if (extension == 0) throw HttpParseException("Bare semicolon with no chunk extension name.")
+                        break
+                    }
+                    extension++
+                    pos++
+                }
+            } else if (c == LF) {
+                throw HttpParseException("Bare LF after chunk size.")
+            } else if (c != CR) {
+                throw HttpParseException("Missing CRLF after chunk size.")
+            }
+            // the CR at pos, then its LF
+            if (++pos >= end) return 0
+            if (input[pos].toInt() != LF) throw HttpParseException("Missing CRLF after chunk size.")
+            pos++
+
+            if (size == 0L) {
+                // ---- trailer lines up to an empty line ----
+                while (true) {
+                    if (pos >= end) return 0
+                    if (pos + 1 < end && input[pos].toInt() == CR && input[pos + 1].toInt() == LF) return pos + 2 - offset
+                    if (input[pos].toInt() == LF) throw HttpParseException("Bare LF in chunked trailer.")
+                    while (true) {
+                        if (pos >= end) return 0
+                        val t = input[pos].toInt()
+                        if (t == LF && input[pos - 1].toInt() != CR) throw HttpParseException("Bare LF in chunked trailer.")
+                        if (t == CR && pos + 1 < end && input[pos + 1].toInt() == LF) {
+                            pos += 2
+                            break
+                        }
+                        pos++
+                    }
+                }
+            }
+
+            // ---- chunk-data CRLF ----
+            if (size > end - pos) return 0
+            val data = pos
+            pos += size.toInt()
+            if (pos + 1 >= end) return 0
+            val d = input[pos].toInt()
+            if (d == LF && input[pos - 1].toInt() != CR) throw HttpParseException("Bare LF after chunk data.")
+            if (d != CR || input[pos + 1].toInt() != LF) throw HttpParseException("Missing CRLF after chunk data.")
+            pos += 2
+            into.append(input, data, size.toInt())
         }
     }
+
+    private const val MAX_CHUNK_EXTENSION = 4096
 }
 
 /**
