@@ -8,13 +8,18 @@ import java.util.Objects
 
 /**
  * Brotli on libbrotlienc (libbrotlienc.so.1), one BrotliEncoderCompress per body. [quality] is 0-11 and
- * [lgwin] the window's log2, 10-24; at quality 5-9 an lgwin of 16 also picks brotli's smaller hashers.
+ * [lgwin] the window's log2, 10-24.
+ *
+ * The default quality, 0, is json-comp's best brotli setting, though gzip at level 1 beats it; at 0 the
+ * window does not change the output of bodies that size, so lgwin stays brotli's own default. At quality 5-9
+ * an lgwin of 16 picks smaller hashers; above 16, quality 9 mallocs a 32 MiB table per call, which glibc
+ * maps fresh each time (about 10x slower on json-comp's bodies).
  *
  * The body is copied into a native buffer the instance reuses and compressed into another, so a call
  * allocates nothing on the JVM heap once the buffers fit the largest body seen. Brotli itself mallocs and
  * frees its state inside each call: it has no reset. [close] frees the native side.
  */
-class BrotliEncoder(val quality: Int = 5, val lgwin: Int = 16) : ContentEncoder, AutoCloseable {
+class BrotliEncoder(val quality: Int = 0, val lgwin: Int = 22) : ContentEncoder, AutoCloseable {
     override val name: String get() = "br"
 
     private val source = NativeBuffer()

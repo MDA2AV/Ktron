@@ -9,8 +9,10 @@ import java.util.zip.Deflater
  * gzip on java.util.zip's Deflater (the JDK's zlib), [level] 0-9: no native library to install, so a fallback
  * where libdeflate is missing, and the baseline [GzipEncoder] is measured against. Raw deflate between a
  * 10-byte header (no name, no mtime) and the CRC-32 and length trailer, as RFC 1952 frames it.
+ *
+ * The default, 3, is zlib's best json-comp setting; libdeflate's level 1 is both faster and smaller.
  */
-class DeflaterGzipEncoder(val level: Int = 6) : ContentEncoder, AutoCloseable {
+class DeflaterGzipEncoder(val level: Int = 3) : ContentEncoder, AutoCloseable {
     override val name: String get() = "gzip"
 
     private val deflater = Deflater(level, true)

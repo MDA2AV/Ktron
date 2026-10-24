@@ -9,10 +9,13 @@ import java.util.Objects
  * gzip on libdeflate (libdeflate.so.0), with one compressor per instance. [level] is libdeflate's 0-12: 1-9
  * track zlib's levels, 10-12 are its near-optimal parsing.
  *
+ * The default, 1, is json-comp's best setting of either codec: the time a higher level or brotli spends saving
+ * bytes costs more score than the bytes win back, until the rest of a request costs about 20 µs.
+ *
  * The body is copied into a native buffer the instance reuses and compressed into another, so a call
  * allocates nothing once the buffers fit the largest body seen. [close] frees the native side.
  */
-class GzipEncoder(val level: Int = 6) : ContentEncoder, AutoCloseable {
+class GzipEncoder(val level: Int = 1) : ContentEncoder, AutoCloseable {
     override val name: String get() = "gzip"
 
     private var compressor = 0L
