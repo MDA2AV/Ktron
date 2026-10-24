@@ -1,6 +1,7 @@
 package ktron.glyph11.bench
 
 import ktron.glyph11.ByteBuilder
+import ktron.glyph11.HeadFraming
 import ktron.glyph11.HttpParseException
 import ktron.glyph11.RequestHead
 import ktron.glyph11.parser.ParserLimits
@@ -256,68 +257,5 @@ internal class NativeParser(private val limits: ParserLimits = ParserLimits.Defa
             NativeGlyph11.CHUNK_ERROR -> throw HttpParseException("malformed chunked encoding")
             else -> 0
         }
-    }
-}
-
-/**
- * BodyFramingDetector.detectBodyFraming over a [RequestHead]: chunked if a Transfer-Encoding is "chunked", else the
- * last Content-Length's leading digits when they are positive, else no body. The C core leaves framing to its
- * caller.
- */
-internal object HeadFraming {
-    private val TE = "transfer-encoding".toByteArray(Charsets.US_ASCII)
-    private val CL = "content-length".toByteArray(Charsets.US_ASCII)
-    private val CHUNKED = "chunked".toByteArray(Charsets.US_ASCII)
-
-    private fun foldEquals(input: ByteArray, at: Int, length: Int, lower: ByteArray): Boolean {
-        if (length != lower.size) return false
-        for (i in 0 until length) if ((input[at + i].toInt() or 0x20) != (lower[i].toInt() or 0x20)) return false
-        return true
-    }
-
-    private fun ows(b: Byte): Boolean = b == ' '.code.toByte() || b == '\t'.code.toByte()
-
-    fun apply(input: ByteArray, head: RequestHead) {
-        var chunked = false
-        var clStart = -1
-        var clEnd = -1
-        for (i in 0 until head.headerCount) {
-            val nameLength = head.headerNameLength(i)
-            if (nameLength != 17 && nameLength != 14) continue
-            var s = head.headerValueStart(i)
-            var e = s + head.headerValueLength(i)
-            while (s < e && ows(input[s])) s++
-            while (e > s && ows(input[e - 1])) e--
-            if (nameLength == 17 && foldEquals(input, head.headerNameStart(i), 17, TE)) {
-                if (foldEquals(input, s, e - s, CHUNKED)) chunked = true
-            } else if (nameLength == 14 && foldEquals(input, head.headerNameStart(i), 14, CL)) {
-                clStart = s
-                clEnd = e
-            }
-        }
-        if (chunked) {
-            head.bodyFraming = RequestHead.BODY_CHUNKED
-            return
-        }
-        if (clStart >= 0 && clEnd > clStart) {
-            var end = clEnd
-            for (j in clStart until clEnd) if (input[j] == ','.code.toByte()) { end = j; break }
-            var value = -1L
-            if (end > clStart) {
-                value = 0L
-                for (j in clStart until end) {
-                    val d = input[j] - '0'.code.toByte()
-                    if (d < 0 || d > 9) { value = -1L; break }
-                    value = value * 10 + d
-                    if (value < 0) { value = -1L; break }
-                }
-            }
-            if (value > 0) {
-                head.bodyFraming = RequestHead.BODY_LENGTH
-                head.contentLength = value
-                return
-            }
-        }
-        head.bodyFraming = RequestHead.BODY_NONE
     }
 }

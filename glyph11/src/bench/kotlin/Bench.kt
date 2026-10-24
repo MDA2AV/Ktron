@@ -2,6 +2,7 @@ package ktron.glyph11.bench
 
 import ktron.glyph11.ByteBuilder
 import ktron.glyph11.Glyph11
+import ktron.glyph11.HttpParseException
 import ktron.glyph11.RequestHead
 import ktron.glyph11.parser.ParserLimits
 import java.lang.management.ManagementFactory
@@ -67,7 +68,21 @@ internal object Requests {
             "\r\n"
         ).toByteArray(Charsets.ISO_8859_1)
 
+    /** post_cl.raw's head with a Transfer-Encoding too: refused only once its last header is read. */
+    val refusedTeCl: ByteArray = (
+        "POST /baseline11?a=13&b=42 HTTP/1.1\r\nHost: localhost:8080\r\nContent-Length: 2\r\n" +
+            "Transfer-Encoding: chunked\r\n\r\n"
+        ).toByteArray(Charsets.ISO_8859_1)
+
+    /** post_cl.raw's head with a NUL in a last header's value: a refusal the line checks find, in their order. */
+    val refusedValue: ByteArray = (
+        "POST /baseline11?a=13&b=42 HTTP/1.1\r\nHost: localhost:8080\r\nContent-Length: 2\r\n" +
+            "X-Trace: abc\u0000def\r\n\r\n"
+        ).toByteArray(Charsets.ISO_8859_1)
+
     const val PIPELINE_DEPTH: Int = 16
+    const val TRICKLE_CHUNKS: Int = 256
+    const val TRICKLE_READS: Int = 64
 
     // A connection's receive buffer: the request at its start, room behind it, as Ktron's per-connection array has.
     const val BUFFER: Int = 16 * 1024
@@ -99,6 +114,27 @@ internal class ParseShape(parser: Parser, private val request: ByteArray) : Shap
     override val describe: String get() = "${request.size} B"
 }
 
+/** Refuses [request], a head whose error shows only near its end: the whole head parsed, then a 400. */
+internal class RefusedShape(parser: Parser, private val request: ByteArray) : Shape(parser) {
+    private val buffer = Requests.inBuffer(request)
+    override fun run(ops: Int): Long {
+        var sum = 0L
+        val buffer = buffer
+        val length = request.size
+        val head = head
+        val parser = parser
+        for (i in 0 until ops) {
+            sum += try {
+                parser.parse(buffer, 0, length, head)
+            } catch (e: HttpParseException) {
+                e.statusCode
+            }
+        }
+        return sum
+    }
+    override val describe: String get() = "${request.size} B, 400"
+}
+
 /** Decodes the chunked body of post_chunked.raw. */
 internal class ChunkedShape(parser: Parser) : Shape(parser) {
     private val request = Requests.postChunked
@@ -118,6 +154,36 @@ internal class ChunkedShape(parser: Parser) : Shape(parser) {
         return sum
     }
     override val describe: String get() = "${request.size - bodyStart} B body"
+}
+
+/**
+ * A chunked body that trickles in: TRICKLE_CHUNKS chunks of 32 bytes, delivered in TRICKLE_READS reads, decoded after
+ * each read. One op is the whole body, every read. [resume] decodes with a ChunkedDecoder, else with decodeChunked.
+ */
+internal class TrickleShape(parser: Parser, private val resume: Boolean) : Shape(parser) {
+    private val body = StringBuilder().apply {
+        repeat(Requests.TRICKLE_CHUNKS) { i -> append("20\r\n").append(('a' + i % 26).toString().repeat(32)).append("\r\n") }
+        append("0\r\n\r\n")
+    }.toString().toByteArray(Charsets.ISO_8859_1)
+    private val buffer = Requests.inBuffer(body)
+    private val reads = IntArray(Requests.TRICKLE_READS) { (it + 1) * body.size / Requests.TRICKLE_READS }
+    private val into = ByteBuilder(body.size)
+    private val decoder = ktron.glyph11.ChunkedDecoder()
+
+    override fun run(ops: Int): Long {
+        var sum = 0L
+        val buffer = buffer
+        val into = into
+        for (i in 0 until ops) {
+            for (length in reads) {
+                val n = if (resume) decoder.decode(buffer, 0, length, into) else parser.decodeChunked(buffer, 0, length, into)
+                sum += n
+            }
+            sum += into.length
+        }
+        return sum
+    }
+    override val describe: String get() = "${body.size} B in ${Requests.TRICKLE_READS} reads" + if (resume) ", ChunkedDecoder" else ""
 }
 
 /** Parses PIPELINE_DEPTH pipelined requests back to back, as one read delivers them: one op is the whole batch. */
@@ -145,7 +211,13 @@ internal class PipelinedShape(parser: Parser) : Shape(parser) {
     override val describe: String get() = "${Requests.PIPELINE_DEPTH} x ${Requests.pipeline.size} B"
 }
 
-internal val SHAPES = listOf("get", "post_cl", "post_chunked", "chunked_body", "browser", "pipelined16")
+internal val SHAPES = listOf(
+    "get", "post_cl", "post_chunked", "chunked_body", "browser", "pipelined16", "refused_te_cl", "refused_value",
+    "chunked_trickle", "chunked_trickle_resume",
+)
+
+/** ChunkedDecoder is the Kotlin parser's: only it runs the resuming shape. */
+internal fun applies(impl: String, shape: String): Boolean = shape != "chunked_trickle_resume" || impl == "kotlin"
 internal val IMPLS = listOf("adapter", "kotlin", "native")
 
 internal fun parserFor(impl: String): Parser = when (impl) {
@@ -162,6 +234,10 @@ internal fun shapeFor(shape: String, parser: Parser): Shape = when (shape) {
     "chunked_body" -> ChunkedShape(parser)
     "browser" -> ParseShape(parser, Requests.browser)
     "pipelined16" -> PipelinedShape(parser)
+    "refused_te_cl" -> RefusedShape(parser, Requests.refusedTeCl)
+    "refused_value" -> RefusedShape(parser, Requests.refusedValue)
+    "chunked_trickle" -> TrickleShape(parser, resume = false)
+    "chunked_trickle_resume" -> TrickleShape(parser, resume = true)
     else -> error("unknown shape $shape")
 }
 
@@ -263,6 +339,7 @@ fun main(args: Array<String>) {
     val results = mutableListOf<Result>()
     for (fork in 1..forks) {
         for (shape in shapes) for (impl in impls) {
+            if (!applies(impl, shape)) continue
             val r = forkOne(impl, shape, runs, warmupMs, runMs) ?: continue
             results += r
             System.err.println("fork $fork: $impl $shape ${"%.1f".format(r.ns)} ns ${"%.1f".format(r.bytes)} B")
@@ -294,11 +371,11 @@ fun main(args: Array<String>) {
 /** Every implementation must agree on what each shape parses to before its speed means anything. */
 private fun checkAgreement(impls: List<String>, shapes: List<String>) {
     for (shape in shapes) {
-        val outcomes = impls.map { impl ->
+        val outcomes = impls.filter { applies(it, shape) }.map { impl ->
             val s = shapeFor(shape, parserFor(impl))
             val sum = s.run(3)
             "${s.head.headLength}/${s.head.headerCount}/${s.head.queryCount}/${s.head.bodyFraming}/${s.head.contentLength}/$sum"
         }
-        require(outcomes.distinct().size == 1) { "implementations disagree on $shape: ${impls.zip(outcomes)}" }
+        require(outcomes.distinct().size == 1) { "implementations disagree on $shape: $outcomes" }
     }
 }
