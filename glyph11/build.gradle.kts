@@ -35,10 +35,8 @@ configurations[bench.runtimeOnlyConfigurationName].extendsFrom(configurations.te
 kotlin.target.compilations.getByName("bench").associateWith(kotlin.target.compilations.getByName("main"))
 
 // The Glyph11 C core (github.com/dotnet-web-stack/Glyph11, core/), built into build/native for the FFM comparison:
-// -Pglyph11Core=<checkout>/core points at it.
-val glyph11Core = providers.gradleProperty("glyph11Core").orElse(
-    "/tmp/claude-1000/-home-diogo-Desktop-Socket-ioxide/b3f0f933-ade2-49c1-a94b-a0c6045881b5/scratchpad/clones/g11-canon/Glyph11/core"
-)
+// a Glyph11 checkout next to this repo, or -Pglyph11Core=<checkout>/core.
+val glyph11Core = providers.gradleProperty("glyph11Core").orElse(rootDir.resolve("../Glyph11/core").path)
 val nativeLib = layout.buildDirectory.file("native/libglyph11.so")
 
 val nativeCore = tasks.register<Exec>("nativeCore") {

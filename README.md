@@ -27,8 +27,10 @@ data class Item(val id: Int, val name: String)
 ## How it works
 
 - **Parsing**: [Glyph11](https://github.com/dotnet-web-stack/Glyph11), the hardened HTTP/1.1 parser (request
-  smuggling, limits, RFC 9112 strictness), from genhttp-kt's Kotlin port, tuned to parse a byte array in place and
-  hand back offsets. See [glyph11/](glyph11/README.md).
+  smuggling, limits, RFC 9112 strictness), from genhttp-kt's Kotlin port, rewritten to parse a byte array in one
+  pass and hand back offsets: about 25 ns for a GET and 130 ns for a 12-header browser request, allocating nothing.
+  That is 2 to 3 times faster than Glyph11's C core called through FFM, whose downcall costs only about 5 ns; the
+  C parse itself is the slower part. See [glyph11/](glyph11/README.md).
 - **Routing**: a trie over path segments - literals, `{param}` (or `:param`), `{*rest}` - with handlers by method,
   405 with an Allow line, HEAD from GET. A match allocates nothing: parameters are offsets into the request.
 - **Middleware**: `before`/`after` hooks, in order, that can short-circuit. They are synchronous, so the
@@ -37,6 +39,10 @@ data class Item(val id: Int, val name: String)
   io_uring write slab and sent with one flush per batch of pipelined requests.
 - **JSON**: [Ghost](https://github.com/juanchurtado1991/ghost-serializer)'s KSP-generated serializers, writing into
   a buffer of the connection's own: no array per response.
+- **Compression**: the `Compression` middleware, gzip on libdeflate and brotli on libbrotlienc, both over FFM.
+  It defaults to gzip level 1: measured on dynamic JSON of a few KB against every gzip, zlib and brotli setting,
+  it scores best under HttpArena's json-comp formula, where speed outweighs the bytes a slower level saves.
+  Without libdeflate it falls back to `java.util.zip`.
 - **TLS**: ioxide's, on BoringSSL with optional kernel TLS (`KtronTls`).
 
 ## Layout
