@@ -9,9 +9,9 @@ import ktron.glyph11.Ascii.isOws
 import ktron.glyph11.parser.ParserLimits
 
 /**
- * UltraHardenedParser.tryExtractFullHeader step by step, over an array: every check in its order, with its message
- * and status, so that a refused request is refused for the same reason. [Glyph11.parse] hands it what its fast path
- * does not accept; it is not tuned.
+ * UltraHardenedParser.tryExtractFullHeader step by step, over an array: every check in its order, and the reason it
+ * refuses for, so that a refused request is refused with the same status and message. [Glyph11.parse] hands it what
+ * its fast path does not accept; it is not tuned.
  */
 internal object ExactParser {
     private val CONNECT = "connect".toByteArray(Charsets.US_ASCII)
@@ -22,56 +22,48 @@ internal object ExactParser {
     private val CHUNKED = "chunked".toByteArray(Charsets.US_ASCII)
     private val ULONG_MAX = "18446744073709551615".toByteArray(Charsets.US_ASCII)
 
+    /** The head's length, 0 to wait for more, or a [Refusals] code (negative): what it is refused for. */
     fun parse(a: ByteArray, offset: Int, length: Int, head: RequestHead, limits: ParserLimits): Int {
         head.reset()
-        try {
-            return parseInto(a, offset, length, head, limits)
-        } catch (e: HttpParseException) {
-            head.reset()
-            throw e
-        }
-    }
-
-    private fun parseInto(a: ByteArray, offset: Int, length: Int, head: RequestHead, limits: ParserLimits): Int {
         val end = offset + length
         val maxTotal = limits.maxTotalHeaderBytes
 
         // A head must end within maxTotal bytes: a CRLFCRLF past them, or none in that many, is 431.
         val headerEnd = Ascii.indexOfCrlfCrlf(a, offset, if (length > maxTotal) offset + maxTotal else end)
         if (headerEnd < 0) {
-            if (length >= maxTotal) throw HttpParseException("Total header size exceeds limit.", 431)
+            if (length >= maxTotal) return Refusals.TOTAL_TOO_LARGE
             return 0
         }
         val total = headerEnd + 4 - offset
 
         // ---- Request line: METHOD SP URL SP VERSION CRLF ----
         val requestLineEnd = Ascii.indexOfCrlf(a, offset, end)
-        if (requestLineEnd < 0) throw HttpParseException("Invalid HTTP/1.1 request line.")
+        if (requestLineEnd < 0) return Refusals.REQUEST_LINE
         if (Ascii.indexOf(a, LF, offset, requestLineEnd) >= 0)
-            throw HttpParseException("Bare LF detected; only CRLF line endings are allowed.")
+            return Refusals.BARE_LF
 
         val firstSpace = Ascii.indexOf(a, SP, offset, requestLineEnd)
-        if (firstSpace < 0) throw HttpParseException("Invalid request line: missing method.")
+        if (firstSpace < 0) return Refusals.MISSING_METHOD
         val secondSpace = Ascii.indexOf(a, SP, firstSpace + 1, requestLineEnd)
-        if (secondSpace < 0) throw HttpParseException("Invalid request line: missing version.")
+        if (secondSpace < 0) return Refusals.MISSING_VERSION
         if (secondSpace > firstSpace + 1 && a[firstSpace + 1].toInt() == SP)
-            throw HttpParseException("Multiple spaces in request line.")
+            return Refusals.MULTIPLE_SPACES
         if (secondSpace + 1 < requestLineEnd && a[secondSpace + 1].toInt() == SP)
-            throw HttpParseException("Multiple spaces in request line.")
+            return Refusals.MULTIPLE_SPACES
 
         val methodLength = firstSpace - offset
-        if (methodLength == 0 || methodLength > limits.maxMethodLength) throw HttpParseException("Method length exceeds limit.")
-        if (!Ascii.allIn(a, offset, firstSpace, TOKEN)) throw HttpParseException("Method contains invalid token characters.")
+        if (methodLength == 0 || methodLength > limits.maxMethodLength) return Refusals.METHOD_LENGTH
+        if (!Ascii.allIn(a, offset, firstSpace, TOKEN)) return Refusals.METHOD_TOKEN
         if (Ascii.foldEquals(a, offset, methodLength, CONNECT))
-            throw HttpParseException("CONNECT method is not allowed on origin servers.")
+            return Refusals.CONNECT
 
         val urlStart = firstSpace + 1
         val urlLength = secondSpace - urlStart
-        if (urlLength > limits.maxUrlLength) throw HttpParseException("URL length exceeds limit.", 431)
-        if (!Ascii.allIn(a, urlStart, secondSpace, TARGET)) throw HttpParseException("Request-target contains invalid characters.")
+        if (urlLength > limits.maxUrlLength) return Refusals.URL_TOO_LONG
+        if (!Ascii.allIn(a, urlStart, secondSpace, TARGET)) return Refusals.TARGET_CHARACTERS
 
         val versionStart = secondSpace + 1
-        if (!isHttpVersion(a, versionStart, requestLineEnd)) throw HttpParseException("Invalid HTTP version.", 505)
+        if (!isHttpVersion(a, versionStart, requestLineEnd)) return Refusals.VERSION
 
         // ---- Path + query ----
         val question = Ascii.indexOf(a, '?'.code, urlStart, secondSpace)
@@ -87,11 +79,11 @@ internal object ExactParser {
                 val eq = Ascii.indexOf(a, '='.code, pair, pairEnd)
                 if (eq > pair) {
                     if (++paramCount > limits.maxQueryParameterCount)
-                        throw HttpParseException("Query parameter count exceeds limit.", 431)
+                        return Refusals.TOO_MANY_PARAMETERS
                     head.addQuery(pair, eq - pair, eq + 1, pairEnd - eq - 1)
                 } else if (eq < 0 && pairEnd > pair) {
                     if (++paramCount > limits.maxQueryParameterCount)
-                        throw HttpParseException("Query parameter count exceeds limit.", 431)
+                        return Refusals.TOO_MANY_PARAMETERS
                     head.addQuery(pair, pairEnd - pair, pairEnd, 0)
                 }
                 pair = if (amp < 0) pairEnd else amp + 1
@@ -104,10 +96,11 @@ internal object ExactParser {
             head.queryLength = 0
         }
 
-        validatePath(a, urlStart, pathLength)
+        val path = validatePath(a, urlStart, pathLength)
+        if (path != 0) return path
 
         if (pathLength == 1 && a[urlStart] == '*'.code.toByte() && !Ascii.foldEquals(a, offset, methodLength, OPTIONS))
-            throw HttpParseException("Asterisk-form request-target is only valid for OPTIONS.")
+            return Refusals.ASTERISK_FORM
 
         // ---- Headers ----
         var lineStart = requestLineEnd + 2
@@ -119,38 +112,38 @@ internal object ExactParser {
         var firstCLLength = 0
         while (true) {
             val lineEnd = Ascii.indexOfCrlf(a, lineStart, end)
-            if (lineEnd < 0) throw HttpParseException("Invalid headers.")
+            if (lineEnd < 0) return Refusals.HEADERS
             if (lineEnd == lineStart) break
 
             if (Ascii.indexOf(a, LF, lineStart, lineEnd) >= 0)
-                throw HttpParseException("Bare LF detected; only CRLF line endings are allowed.")
-            if (isOws(a[lineStart].toInt())) throw HttpParseException("Obsolete line folding (obs-fold) is not allowed.")
+                return Refusals.BARE_LF
+            if (isOws(a[lineStart].toInt())) return Refusals.OBS_FOLD
 
             val colon = Ascii.indexOf(a, ':'.code, lineStart, lineEnd)
-            if (colon < 0) throw HttpParseException("Malformed header line: missing colon.")
-            if (colon == lineStart) throw HttpParseException("Header name is empty.")
-            if (isOws(a[colon - 1].toInt())) throw HttpParseException("Whitespace between header name and colon is not allowed.")
+            if (colon < 0) return Refusals.MISSING_COLON
+            if (colon == lineStart) return Refusals.EMPTY_NAME
+            if (isOws(a[colon - 1].toInt())) return Refusals.SPACE_BEFORE_COLON
 
             val nameLength = colon - lineStart
-            if (nameLength > limits.maxHeaderNameLength) throw HttpParseException("Header name length exceeds limit.", 431)
-            if (!Ascii.allIn(a, lineStart, colon, TOKEN)) throw HttpParseException("Header name contains invalid token characters.")
+            if (nameLength > limits.maxHeaderNameLength) return Refusals.NAME_TOO_LONG
+            if (!Ascii.allIn(a, lineStart, colon, TOKEN)) return Refusals.NAME_TOKEN
 
             var valueStart = colon + 1
             while (valueStart < lineEnd && isOws(a[valueStart].toInt())) valueStart++
             val valueLength = lineEnd - valueStart
-            if (valueLength > limits.maxHeaderValueLength) throw HttpParseException("Header value length exceeds limit.", 431)
-            if (!Ascii.allIn(a, valueStart, lineEnd, FIELD)) throw HttpParseException("Header value contains invalid characters.")
+            if (valueLength > limits.maxHeaderValueLength) return Refusals.VALUE_TOO_LONG
+            if (!Ascii.allIn(a, valueStart, lineEnd, FIELD)) return Refusals.VALUE_CHARACTERS
 
-            if (++headerCount > limits.maxHeaderCount) throw HttpParseException("Header count exceeds limit.", 431)
+            if (++headerCount > limits.maxHeaderCount) return Refusals.TOO_MANY_HEADERS
             head.addHeader(lineStart, nameLength, valueStart, valueLength)
 
             if (nameLength == 14 && Ascii.foldEquals(a, lineStart, 14, CONTENT_LENGTH)) {
-                if (!isValidContentLength(a, valueStart, valueLength)) throw HttpParseException("Invalid Content-Length format.")
+                if (!isValidContentLength(a, valueStart, valueLength)) return Refusals.CONTENT_LENGTH_FORMAT
                 if (hasConflictingCommaSeparatedCL(a, valueStart, valueLength))
-                    throw HttpParseException("Conflicting comma-separated Content-Length values.")
+                    return Refusals.CONTENT_LENGTH_COMMAS
                 if (hasCL) {
                     if (!Ascii.rangeEquals(a, valueStart, valueLength, firstCLStart, firstCLLength))
-                        throw HttpParseException("Conflicting Content-Length headers.")
+                        return Refusals.CONTENT_LENGTHS
                 } else {
                     firstCLStart = valueStart
                     firstCLLength = valueLength
@@ -163,18 +156,18 @@ internal object ExactParser {
                 while (s < e && isOws(a[s].toInt())) s++
                 while (e > s && isOws(a[e - 1].toInt())) e--
                 if (!Ascii.foldEquals(a, s, e - s, CHUNKED))
-                    throw HttpParseException("Invalid Transfer-Encoding value; only 'chunked' is accepted.")
+                    return Refusals.TRANSFER_ENCODING
             } else if (nameLength == 4 && Ascii.foldEquals(a, lineStart, 4, HOST)) {
                 hostCount++
                 if (Ascii.indexOf(a, '@'.code, valueStart, lineEnd) >= 0 || Ascii.indexOf(a, '/'.code, valueStart, lineEnd) >= 0)
-                    throw HttpParseException("Invalid Host header: contains '@' or '/'.")
+                    return Refusals.HOST_FORMAT
             }
 
             lineStart = lineEnd + 2
         }
 
-        if (hasTE && hasCL) throw HttpParseException("Both Transfer-Encoding and Content-Length are present.")
-        if (hostCount != 1) throw HttpParseException("Request must have exactly one Host header.")
+        if (hasTE && hasCL) return Refusals.TE_AND_CL
+        if (hostCount != 1) return Refusals.HOST_COUNT
 
         head.headLength = total
         head.methodStart = offset
@@ -193,28 +186,32 @@ internal object ExactParser {
             a[from + 3] == 'P'.code.toByte() && a[from + 4] == '/'.code.toByte() && a[from + 5] == '1'.code.toByte() &&
             a[from + 6] == '.'.code.toByte() && (a[from + 7] == '0'.code.toByte() || a[from + 7] == '1'.code.toByte())
 
-    /** Fragment, backslash, %25, %00 and dot segments in the path (its overlong UTF-8 checks are past the target check). */
-    private fun validatePath(a: ByteArray, pathStart: Int, pathLength: Int) {
+    /**
+     * Fragment, backslash, %25, %00 and dot segments in the path (its overlong UTF-8 checks are past the target check):
+     * 0, or the refusal.
+     */
+    private fun validatePath(a: ByteArray, pathStart: Int, pathLength: Int): Int {
         for (i in 0 until pathLength) {
             val b = a[pathStart + i].toInt()
-            if (b == '#'.code) throw HttpParseException("Fragment indicator (#) in request-target.")
-            if (b == '\\'.code) throw HttpParseException("Backslash in request path.")
+            if (b == '#'.code) return Refusals.FRAGMENT
+            if (b == '\\'.code) return Refusals.BACKSLASH
             if (b == '%'.code && i + 2 < pathLength) {
                 val h1 = a[pathStart + i + 1].toInt()
                 val h2 = a[pathStart + i + 2].toInt()
-                if (h1 == '2'.code && h2 == '5'.code) throw HttpParseException("Double-encoded percent (%25) in path.")
-                if (h1 == '0'.code && h2 == '0'.code) throw HttpParseException("Encoded null byte (%00) in path.")
+                if (h1 == '2'.code && h2 == '5'.code) return Refusals.DOUBLE_ENCODING
+                if (h1 == '0'.code && h2 == '0'.code) return Refusals.ENCODED_NULL
             }
             if (b == '/'.code) {
                 val remaining = pathLength - i - 1
                 if (remaining >= 1 && a[pathStart + i + 1].toInt() == '.'.code) {
                     if (remaining == 1 || a[pathStart + i + 2].toInt() == '/'.code)
-                        throw HttpParseException("Dot segment in request path.")
+                        return Refusals.DOT_SEGMENT
                     if (a[pathStart + i + 2].toInt() == '.'.code && (remaining == 2 || a[pathStart + i + 3].toInt() == '/'.code))
-                        throw HttpParseException("Dot segment in request path.")
+                        return Refusals.DOT_SEGMENT
                 }
             }
         }
+        return 0
     }
 
     private fun isDigit(b: Int): Boolean = b >= '0'.code && b <= '9'.code

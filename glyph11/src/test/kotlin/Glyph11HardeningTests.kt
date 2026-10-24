@@ -64,6 +64,20 @@ class Glyph11HardeningTests {
         assertEquals(431, assertFailsWith<HttpParseException> { UltraHardenedParser.tryExtractFullResponseHeader(response, BinaryResponse(), limits) }.statusCode)
     }
 
+    @Test
+    fun `a refusal is a shared exception, one per reason, with its status`() {
+        val missingHost = bytes("GET / HTTP/1.1\r\n\r\n")
+        val badValue = bytes("GET / HTTP/1.1\r\nHost: x\r\nX: a\u0000b\r\n\r\n")
+        val first = assertFailsWith<HttpParseException> { Glyph11.parse(missingHost, 0, missingHost.size, RequestHead()) }
+        val second = assertFailsWith<HttpParseException> { Glyph11.parse(missingHost, 0, missingHost.size, RequestHead()) }
+        kotlin.test.assertSame(first, second)
+        assertEquals(400, first.statusCode)
+        assertEquals(0, first.stackTrace.size)
+        val other = assertFailsWith<HttpParseException> { Glyph11.parse(badValue, 0, badValue.size, RequestHead()) }
+        kotlin.test.assertNotSame(first, other)
+        assertEquals("Header value contains invalid characters.", other.message)
+    }
+
     // ---- chunk sizes are unsigned: 2^63 and up is refused, not read as its low bits ----
 
     private val topBitSizes = listOf("8000000000000005", "8000000000000000", "ffffffffffffffff", "FFFFFFFFFFFFFFFF", "800000000000000a")

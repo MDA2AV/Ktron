@@ -138,9 +138,13 @@ object Outcomes {
     fun glyph11(input: ByteArray, offset: Int, length: Int, limits: ParserLimits, head: RequestHead = RequestHead()): Outcome =
         outcome(input, head) { Glyph11.parse(input, offset, length, head, limits) }
 
-    /** The exact parser alone, as Glyph11.parse uses it for what its fast path leaves. */
+    /** The exact parser alone, as Glyph11.parse uses it for what its fast path leaves: a negative result is a refusal. */
     fun exact(input: ByteArray, offset: Int, length: Int, limits: ParserLimits, head: RequestHead = RequestHead()): Outcome =
-        outcome(input, head) { ExactParser.parse(input, offset, length, head, limits) }
+        outcome(input, head) {
+            val n = ExactParser.parse(input, offset, length, head, limits)
+            if (n < 0) throw Refusals.exception(n)
+            n
+        }
 
     /** The old decodeChunked: ChunkedBodyStream chunk by chunk, a fresh stream per call. */
     fun referenceChunked(input: ByteArray, offset: Int, length: Int): ChunkOutcome {

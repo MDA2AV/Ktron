@@ -20,12 +20,16 @@ public object Glyph11 {
      * returns the head's length with its CRLFCRLF; 0 when the head has not all arrived. Throws
      * [HttpParseException] for a request to refuse, with the status to refuse it with: the checks, their order and
      * their statuses are UltraHardenedParser.tryExtractFullHeader's, and the framing BodyFramingDetector's. A head
-     * that has not ended within [ParserLimits.maxTotalHeaderBytes] is refused with 431.
+     * that has not ended within [ParserLimits.maxTotalHeaderBytes] is refused with 431. The exception is the one
+     * stackless instance kept for its reason, shared: a refusal allocates nothing.
      */
     public fun parse(input: ByteArray, offset: Int, length: Int, head: RequestHead, limits: ParserLimits = ParserLimits.Default): Int {
         Objects.checkFromIndexSize(offset, length, input.size)
-        val n = FastParser.parse(input, offset, length, head, limits)
-        return if (n != FastParser.BAIL) n else ExactParser.parse(input, offset, length, head, limits)
+        var n = FastParser.parse(input, offset, length, head, limits)
+        if (n == FastParser.BAIL) n = ExactParser.parse(input, offset, length, head, limits)
+        if (n >= 0) return n
+        head.reset()
+        throw Refusals.exception(n)
     }
 
     /**
@@ -50,44 +54,44 @@ public object Glyph11 {
                 c = input[pos].toInt() and 0xFF
                 val h = hex[c].toInt()
                 if (h < 0) break
-                if (digits >= 16) throw HttpParseException("Chunk size overflow.")
+                if (digits >= 16) refuse(Refusals.CHUNK_OVERFLOW)
                 size = (size shl 4) or h.toLong()
                 // 16 digits reach 2^64 - 1, a negative Long: refused, not cut to its low bits
-                if (size < 0) throw HttpParseException("Chunk size overflow.")
+                if (size < 0) refuse(Refusals.CHUNK_OVERFLOW)
                 digits++
                 if (++pos >= end) return 0
             }
             if (digits == 0) {
-                if (c == SP || c == HTAB) throw HttpParseException("Leading whitespace in chunk size.")
-                if (c == '-'.code) throw HttpParseException("Negative chunk size.")
-                throw HttpParseException("Invalid character in chunk size.")
+                if (c == SP || c == HTAB) refuse(Refusals.CHUNK_LEADING_WHITESPACE)
+                if (c == '-'.code) refuse(Refusals.CHUNK_NEGATIVE)
+                refuse(Refusals.CHUNK_SIZE_CHARACTER)
             }
-            if (digits == 1 && size == 0L && (c == 'x'.code || c == 'X'.code)) throw HttpParseException("Hex prefix in chunk size.")
-            if (c == '_'.code) throw HttpParseException("Underscore in chunk size.")
+            if (digits == 1 && size == 0L && (c == 'x'.code || c == 'X'.code)) refuse(Refusals.CHUNK_HEX_PREFIX)
+            if (c == '_'.code) refuse(Refusals.CHUNK_UNDERSCORE)
             if (c == ';'.code) {
                 pos++
                 var extension = 0
                 while (true) {
                     if (pos >= end) return 0
                     val e = input[pos].toInt()
-                    if (extension > MAX_CHUNK_EXTENSION) throw HttpParseException("Chunk extension too large.")
-                    if (e == 0) throw HttpParseException("NUL byte in chunk extension.")
-                    if (e == LF) throw HttpParseException("Bare LF in chunk extension.")
+                    if (extension > MAX_CHUNK_EXTENSION) refuse(Refusals.CHUNK_EXTENSION_TOO_LARGE)
+                    if (e == 0) refuse(Refusals.CHUNK_EXTENSION_NUL)
+                    if (e == LF) refuse(Refusals.CHUNK_EXTENSION_BARE_LF)
                     if (e == CR) {
-                        if (extension == 0) throw HttpParseException("Bare semicolon with no chunk extension name.")
+                        if (extension == 0) refuse(Refusals.CHUNK_BARE_SEMICOLON)
                         break
                     }
                     extension++
                     pos++
                 }
             } else if (c == LF) {
-                throw HttpParseException("Bare LF after chunk size.")
+                refuse(Refusals.CHUNK_SIZE_BARE_LF)
             } else if (c != CR) {
-                throw HttpParseException("Missing CRLF after chunk size.")
+                refuse(Refusals.CHUNK_SIZE_CRLF)
             }
             // the CR at pos, then its LF
             if (++pos >= end) return 0
-            if (input[pos].toInt() != LF) throw HttpParseException("Missing CRLF after chunk size.")
+            if (input[pos].toInt() != LF) refuse(Refusals.CHUNK_SIZE_CRLF)
             pos++
 
             if (size == 0L) {
@@ -95,11 +99,11 @@ public object Glyph11 {
                 while (true) {
                     if (pos >= end) return 0
                     if (pos + 1 < end && input[pos].toInt() == CR && input[pos + 1].toInt() == LF) return pos + 2 - offset
-                    if (input[pos].toInt() == LF) throw HttpParseException("Bare LF in chunked trailer.")
+                    if (input[pos].toInt() == LF) refuse(Refusals.TRAILER_BARE_LF)
                     while (true) {
                         if (pos >= end) return 0
                         val t = input[pos].toInt()
-                        if (t == LF && input[pos - 1].toInt() != CR) throw HttpParseException("Bare LF in chunked trailer.")
+                        if (t == LF && input[pos - 1].toInt() != CR) refuse(Refusals.TRAILER_BARE_LF)
                         if (t == CR && pos + 1 < end && input[pos + 1].toInt() == LF) {
                             pos += 2
                             break
@@ -115,24 +119,28 @@ public object Glyph11 {
             pos += size.toInt()
             if (pos + 1 >= end) return 0
             val d = input[pos].toInt()
-            if (d == LF && input[pos - 1].toInt() != CR) throw HttpParseException("Bare LF after chunk data.")
-            if (d != CR || input[pos + 1].toInt() != LF) throw HttpParseException("Missing CRLF after chunk data.")
+            if (d == LF && input[pos - 1].toInt() != CR) refuse(Refusals.CHUNK_DATA_BARE_LF)
+            if (d != CR || input[pos + 1].toInt() != LF) refuse(Refusals.CHUNK_DATA_CRLF)
             pos += 2
             into.append(input, data, size.toInt())
         }
     }
 
     private const val MAX_CHUNK_EXTENSION = 4096
+
+    private fun refuse(code: Int): Nothing = throw Refusals.exception(code)
 }
 
 /**
  * One forward pass over a head that is valid: each line is scanned once, with the checks fused into the scans (a
  * class table per byte for the method, the target and the field names, eight bytes at a time for the field values).
- * It accepts exactly the heads UltraHardenedParser accepts and returns 0 exactly when it would wait, but it does not
- * work out why a head is refused: anything it does not accept it leaves to [ExactParser] ([BAIL]).
+ * It accepts exactly the heads UltraHardenedParser accepts and returns 0 exactly when it would wait. It refuses only
+ * where it knows every earlier check has passed (a head too large, the cross-header checks); anything else it does
+ * not accept it leaves to [ExactParser] ([BAIL]), which works out the first reason in UltraHardenedParser's order.
  */
 internal object FastParser {
-    const val BAIL: Int = -1
+    /** Not accepted, for a reason [ExactParser] works out; the other negative results are [Refusals] codes. */
+    const val BAIL: Int = Int.MIN_VALUE
 
     private val HTTP_11: Long = wordOf("HTTP/1.1")
     private val HTTP_10: Long = wordOf("HTTP/1.0")
@@ -337,7 +345,10 @@ internal object FastParser {
             }
             line = e + 2
         }
-        if (hostCount != 1 || (chunked && clStart >= 0)) return BAIL
+        // every line passed its checks and the head ended within the limit: the cross-header checks come next, in
+        // UltraHardenedParser's order
+        if (chunked && clStart >= 0) return Refusals.TE_AND_CL
+        if (hostCount != 1) return Refusals.HOST_COUNT
 
         val headLength = line - offset
         head.headLength = headLength
@@ -374,8 +385,8 @@ internal object FastParser {
      * 0 to wait for more, or 431 once the input holds the limit.
      */
     private fun outOfInput(length: Int, maxTotal: Int, head: RequestHead): Int {
+        if (length >= maxTotal) return Refusals.TOTAL_TOO_LARGE
         head.reset()
-        if (length >= maxTotal) throw HttpParseException("Total header size exceeds limit.", 431)
         return 0
     }
 
