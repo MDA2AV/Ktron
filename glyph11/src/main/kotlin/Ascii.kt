@@ -102,11 +102,21 @@ internal object Ascii {
 
     // ---- the reference scans, for the exact parser ----
 
-    /** The first index of [b] in `[from, to)`, or -1. */
+    /** The first index of [b] in `[from, to)`, or -1: eight bytes at a time, the rest byte by byte. */
     @JvmStatic
     fun indexOf(a: ByteArray, b: Int, from: Int, to: Int): Int {
+        val pattern = (b.toLong() and 0xFF) * ONES
+        var i = from
+        while (i + 8 <= to) {
+            val m = zeroBytes(word(a, i) xor pattern)
+            if (m != 0L) return i + (java.lang.Long.numberOfTrailingZeros(m) ushr 3)
+            i += 8
+        }
         val v = b.toByte()
-        for (i in from until to) if (a[i] == v) return i
+        while (i < to) {
+            if (a[i] == v) return i
+            i++
+        }
         return -1
     }
 
@@ -114,22 +124,25 @@ internal object Ascii {
     @JvmStatic
     fun indexOfCrlf(a: ByteArray, from: Int, to: Int): Int {
         var i = from
-        while (i + 1 < to) {
-            if (a[i].toInt() == CR && a[i + 1].toInt() == LF) return i
-            i++
+        while (true) {
+            // a CR with room for its LF
+            val cr = indexOf(a, CR, i, to - 1)
+            if (cr < 0) return -1
+            if (a[cr + 1].toInt() == LF) return cr
+            i = cr + 1
         }
-        return -1
     }
 
     /** The index of the first CR of the first CRLFCRLF in `[from, to)`, or -1. */
     @JvmStatic
     fun indexOfCrlfCrlf(a: ByteArray, from: Int, to: Int): Int {
         var i = from
-        while (i + 3 < to) {
-            if (a[i].toInt() == CR && a[i + 1].toInt() == LF && a[i + 2].toInt() == CR && a[i + 3].toInt() == LF) return i
-            i++
+        while (true) {
+            val cr = indexOf(a, CR, i, to - 3)
+            if (cr < 0) return -1
+            if (a[cr + 1].toInt() == LF && a[cr + 2].toInt() == CR && a[cr + 3].toInt() == LF) return cr
+            i = cr + 1
         }
-        return -1
     }
 
     /** True if every byte in `[from, to)` has [bits] in [CLASS]. */
