@@ -1,5 +1,6 @@
 plugins {
     kotlin("jvm")
+    id("com.google.devtools.ksp")
 }
 
 description = "Ktron: an HTTP/1.1 web framework on the Kotlin port of ioxide"
@@ -13,6 +14,7 @@ dependencies {
     api(project(":glyph11"))
     api("com.ghostserializer:ghost-serialization:1.3.5")
     testImplementation(kotlin("test"))
+    kspTest("com.ghostserializer:ghost-compiler:1.3.5")
 }
 
 tasks.test {

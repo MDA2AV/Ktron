@@ -13,7 +13,7 @@ dependencyResolutionManagement {
 
 rootProject.name = "Ktron"
 
-include(":glyph11", ":ktron")
+include(":glyph11", ":ktron", ":examples:arena")
 
 // The Kotlin port of ioxide, Ktron's runtime: kotlin/ioxide of an ioxide checkout next to this one, or wherever
 // -PioxideKt points.
