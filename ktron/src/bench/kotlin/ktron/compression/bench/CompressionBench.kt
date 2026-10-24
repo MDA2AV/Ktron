@@ -21,7 +21,7 @@ import java.util.zip.GZIPInputStream
  *             proxy 1 / ((base + t_avg) * (avgBody + head)^2) for base 3 and 6 µs
  *   variants  the committed encoders against the designs in Variants.kt
  *   alloc     JVM heap bytes per encode
- *   leak      malloc'd bytes and RSS across many encodes, and across create/close cycles
+ *   leak      malloc'd bytes and RSS across --runs runs of many encodes, and of create/close cycles
  *   cold      per-call time with the caches flushed between calls, for the leading configurations
  *
  * --dataset PATH  dataset.json (default ../../HttpArena-edixoi-kt/data/dataset.json from ktron/)
@@ -89,7 +89,7 @@ fun main(args: Array<String>) {
         "table" -> table(o, bodies)
         "variants" -> variants(o, bodies)
         "alloc" -> alloc(bodies)
-        "leak" -> leak(bodies)
+        "leak" -> leak(o, bodies)
         "cold" -> cold(o, bodies)
         else -> error("unknown mode ${o.mode}")
     }
@@ -272,7 +272,7 @@ private fun alloc(bodies: List<ByteArray>) {
     }
 }
 
-private fun leak(bodies: List<ByteArray>) {
+private fun leak(o: Options, bodies: List<ByteArray>) {
     warmJit(bodies)
     val arr = bodies.toTypedArray()
     val out = ByteBuilder(bodies[2].size * 2)
@@ -280,19 +280,20 @@ private fun leak(bodies: List<ByteArray>) {
         System.gc()
         return NativeStats.mallocInUse()
     }
-    // Two equal runs after a warm one: a leak grows both by the same bytes per op, noise does not.
+    // Equal runs after a warm one: a leak grows every run by the same bytes per op, noise does not.
     fun check(what: String, n: Int, block: (Int) -> Unit) {
         block(maxOf(n / 4, 1))
-        val m0 = inUse()
+        var m = inUse()
         val r0 = NativeStats.rssBytes()
-        block(n)
-        val m1 = inUse()
-        block(n)
-        val m2 = inUse()
-        val r2 = NativeStats.rssBytes()
-        println("%-46s %+9.2f %+9.2f B/op, RSS %+6d KiB".format(what, (m1 - m0).toDouble() / n, (m2 - m1).toDouble() / n, (r2 - r0) / 1024))
+        val perOp = DoubleArray(o.runs) {
+            block(n)
+            val now = inUse()
+            ((now - m).toDouble() / n).also { m = now }
+        }
+        val r1 = NativeStats.rssBytes()
+        println("%-46s %s B/op, RSS %+6d KiB".format(what, perOp.joinToString(" ") { "%+9.2f".format(it) }, (r1 - r0) / 1024))
     }
-    println("malloc in use (uordblks + hblkhd) per op, two runs of n ops each:")
+    println("malloc in use (uordblks + hblkhd) per op, ${o.runs} runs of n ops each:")
     for ((name, make, n) in listOf(
         Triple("libdeflate-1", { GzipEncoder(1) as ContentEncoder }, 200_000),
         Triple("libdeflate-12", { GzipEncoder(12) as ContentEncoder }, 3_000),
@@ -301,7 +302,7 @@ private fun leak(bodies: List<ByteArray>) {
         Triple("br-5-16", { BrotliEncoder(5, 16) as ContentEncoder }, 50_000),
         Triple("br-9-22", { BrotliEncoder(9, 22) as ContentEncoder }, 1_500),
         Triple("br-11-22", { BrotliEncoder(11, 22) as ContentEncoder }, 300),
-    )) {
+    ).filter { it.first.startsWith(o.filter) }) {
         val e = make()
         check("$name: n=$n encodes on one encoder", n) { encodeAll(e, arr, it, out) }
         (e as AutoCloseable).close()
