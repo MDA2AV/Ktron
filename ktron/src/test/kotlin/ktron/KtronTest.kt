@@ -1,6 +1,8 @@
 package ktron
 
 import com.ghost.serialization.annotations.GhostSerialization
+import ktron.compression.gunzip
+import ktron.compression.unbrotli
 import java.io.InputStream
 import java.net.Socket
 import kotlin.test.Test
@@ -14,7 +16,9 @@ data class Greeting(val message: String, val n: Int)
 
 /** Ktron end to end, over raw sockets: what goes on the wire, byte for byte where it matters. */
 class KtronTest {
-    private class Reply(val status: Int, val headers: Map<String, String>, val body: String)
+    private class Reply(val status: Int, val headers: Map<String, String>, val raw: ByteArray) {
+        val body: String get() = String(raw, Charsets.UTF_8)
+    }
 
     private fun withApp(configure: (Ktron) -> Unit, body: (port: Int) -> Unit) {
         val app = Ktron(KtronOptions(port = 0, reactors = 1))
@@ -58,7 +62,7 @@ class KtronTest {
         val status = lines[0].split(' ')[1].toInt()
         val headers = lines.drop(1).associate { it.substringBefore(':').lowercase() to it.substringAfter(':').trim() }
         val length = headers["content-length"]?.toInt() ?: 0
-        val body = if (status == 100) "" else String(input.readNBytes(length), Charsets.UTF_8)
+        val body = if (status == 100) ByteArray(0) else input.readNBytes(length)
         return Reply(status, headers, body)
     }
 
@@ -252,6 +256,37 @@ class KtronTest {
         val body = """{"message":"yo","n":41}"""
         val back = exchange(port, "POST /greet HTTP/1.1\r\nHost: t\r\nContent-Type: application/json\r\nContent-Length: ${body.length}\r\n\r\n$body")[0]
         assertEquals("""{"message":"yo","n":42}""", back.body)
+    }
+
+    @Test
+    fun `compression follows Accept-Encoding, prefers gzip, and leaves small or uncompressible bodies alone`() {
+        val big = "x".repeat(2000) + "end"
+        withApp({ app ->
+            app.use(Compression())
+            app.get("/big") { ctx -> ctx.response.text(big) }
+            app.get("/small") { ctx -> ctx.response.text("tiny") }
+            app.get("/bin") { ctx -> ctx.response.bytes(big.toByteArray()) }
+        }) { port ->
+            val both = exchange(port, get("/big", "Accept-Encoding: gzip, br\r\n"))[0]
+            assertEquals("gzip", both.headers["content-encoding"])
+            assertEquals(big, String(gunzip(both.raw, 0, both.raw.size)))
+            assertTrue(both.raw.size < big.length)
+
+            val brOnly = exchange(port, get("/big", "Accept-Encoding: br\r\n"))[0]
+            assertEquals("br", brOnly.headers["content-encoding"])
+            assertEquals(big, String(unbrotli(brOnly.raw, 0, brOnly.raw.size, big.length * 2)))
+
+            val gzipRefused = exchange(port, get("/big", "Accept-Encoding: gzip;q=0, br;q=0.5\r\n"))[0]
+            assertEquals("br", gzipRefused.headers["content-encoding"])
+
+            val star = exchange(port, get("/big", "Accept-Encoding: *\r\n"))[0]
+            assertEquals("gzip", star.headers["content-encoding"])
+
+            assertNull(exchange(port, get("/big"))[0].headers["content-encoding"])
+            assertNull(exchange(port, get("/big", "Accept-Encoding: identity\r\n"))[0].headers["content-encoding"])
+            assertNull(exchange(port, get("/small", "Accept-Encoding: gzip\r\n"))[0].headers["content-encoding"])
+            assertNull(exchange(port, get("/bin", "Accept-Encoding: gzip\r\n"))[0].headers["content-encoding"])
+        }
     }
 
     @Test

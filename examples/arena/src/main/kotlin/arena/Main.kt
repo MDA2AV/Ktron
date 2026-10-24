@@ -1,6 +1,7 @@
 package arena
 
 import com.ghost.serialization.Ghost
+import ktron.Compression
 import ktron.Context
 import ktron.Ktron
 import ktron.KtronOptions
@@ -32,6 +33,9 @@ fun main() {
 
     // Per reactor: a request runs on one thread start to finish, so its items and response object are its own.
     val json = Array(reactors) { JsonState(dataset) }
+
+    // gzip for whoever accepts it (json-comp), nothing for whoever does not (json-tls).
+    app.use(Compression())
 
     app.get("/baseline11") { ctx -> ctx.response.text(querySum(ctx)) }
     app.post("/baseline11") { ctx -> ctx.response.text(querySum(ctx) + bodyDigits(ctx)) }
